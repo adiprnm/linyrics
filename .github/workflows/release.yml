@@ -1,0 +1,275 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDL3_VERSION: "3.4.18"
+  CURL_VERSION: "8.23.0"
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libssl-dev zlib1g-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libdecor-0-dev \
+            libasound2-dev libpulse-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxfixes-dev libxss-dev libxtst-dev libxkbcommon-x11-dev \
+            libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgles2-mesa-dev \
+            libudev-dev libdbus-1-dev libibus-1.0-dev
+
+      - name: Cache SDL3
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sdl3
+          key: sdl3-shared-${{ runner.os }}-${{ env.SDL3_VERSION }}-v1
+
+      - name: Cache libcurl
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/curl
+          key: curl-static-${{ runner.os }}-${{ env.CURL_VERSION }}-v1
+
+      - name: Build SDL3 (shared)
+        run: ./packaging/build-sdl3.sh "$RUNNER_TEMP/sdl3" shared
+
+      - name: Build libcurl (static, HTTPS only)
+        run: ./packaging/build-curl.sh "$RUNNER_TEMP/curl"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3" \
+            -DCURL_ROOT="$RUNNER_TEMP/curl"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Smoke test (offscreen)
+        run: |
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            LINYRICS_TEST=1 ./build/linyrics
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            LINYRICS_SCREENSHOT="$RUNNER_TEMP/shot.bmp" LINYRICS_SCENE=playing \
+            ./build/linyrics
+          test -s "$RUNNER_TEMP/shot.bmp"
+          ldd build/linyrics | grep -E "libSDL3|libcurl" || true
+
+      - name: Package AppImage
+        run: ./packaging/make-appimage.sh ./build/linyrics "$RUNNER_TEMP/sdl3" linyrics-linux-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linyrics-linux-x86_64
+          path: linyrics-linux-x86_64.AppImage
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL3
+            mingw-w64-x86_64-curl
+            zip
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build
+
+      - name: Smoke test (offscreen)
+        shell: msys2 {0}
+        run: |
+          export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
+          ./build/linyrics.exe --version
+          LINYRICS_TEST=1 ./build/linyrics.exe
+
+      - name: Package
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist
+          cp build/linyrics.exe dist/
+          # SDL3 + libcurl and whatever they need, but nothing from the OS
+          ldd build/linyrics.exe | awk '/mingw64/ {print $3}' | sort -u | xargs -r -I{} cp {} dist/
+          cp README.md CHANGELOG.md dist/
+          (cd dist && zip -9 -r ../linyrics-windows-x64.zip .)
+          ls -lh linyrics-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linyrics-windows-x64
+          path: linyrics-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja pkg-config
+
+      - name: Cache SDL3
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sdl3
+          key: sdl3-static-${{ runner.os }}-${{ env.SDL3_VERSION }}-v1
+
+      - name: Build SDL3 (static)
+        run: ./packaging/build-sdl3.sh "$RUNNER_TEMP/sdl3"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl3" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Smoke test (offscreen)
+        run: |
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+            LINYRICS_TEST=1 ./build/linyrics
+          test "$(./build/linyrics --version)" = "linyrics 1.0.0"
+
+      - name: Package app bundle
+        run: |
+          set -euo pipefail
+          APP="Linyrics.app"
+          rm -rf "$APP" Linyrics.iconset
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp build/linyrics "$APP/Contents/MacOS/linyrics"
+
+          mkdir -p Linyrics.iconset
+          for spec in \
+            "16 icon_16x16" "32 icon_16x16@2x" \
+            "32 icon_32x32" "64 icon_32x32@2x" \
+            "128 icon_128x128" "256 icon_128x128@2x" \
+            "256 icon_256x256" "512 icon_256x256@2x" \
+            "512 icon_512x512" "1024 icon_512x512@2x"; do
+            set -- $spec
+            sips -z "$1" "$1" assets/icon.png --out "Linyrics.iconset/$2.png" >/dev/null
+          done
+          iconutil -c icns Linyrics.iconset -o "$APP/Contents/Resources/Linyrics.icns"
+
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Linyrics</string>
+            <key>CFBundleDisplayName</key><string>Linyrics</string>
+            <key>CFBundleIdentifier</key><string>local.linyrics.app</string>
+            <key>CFBundleExecutable</key><string>linyrics</string>
+            <key>CFBundleIconFile</key><string>Linyrics</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleVersion</key><string>1.0.0</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+
+          # Ad-hoc signature: right-click -> Open on first launch.
+          codesign --force --deep --sign - "$APP"
+          hdiutil create -volname "Linyrics" -srcfolder "$APP" -ov -format UDZO linyrics-macos-arm64.dmg
+          ls -lh linyrics-macos-arm64.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linyrics-macos-arm64
+          path: linyrics-macos-arm64.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          du -h *
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          body: |
+            ## Linyrics ${{ github.ref_name }}
+
+            Lirik melayang ala MiniLyrics untuk [Linamp](https://github.com/adiprnm/linamp) —
+            C++ / SDL3 + libcurl, tanpa Qt/Electron.
+
+            ![Linyrics](https://raw.githubusercontent.com/adiprnm/linyrics/main/screenshot.png)
+
+            | Platform | File | Catatan |
+            | --- | --- | --- |
+            | Linux x86_64 | `linyrics-linux-x86_64.AppImage` | glibc 2.39+; SDL3 dibundel, libcurl statis |
+            | Windows x64 | `linyrics-windows-x64.zip` | Ekstrak lalu jalankan `linyrics.exe` (DLL ikut di dalam) |
+            | macOS arm64 | `linyrics-macos-arm64.dmg` | Ad-hoc signed; klik kanan → Open kalau Gatekeeper menolak |
+
+            Checksums: `SHA256SUMS.txt`.
+
+            ### Pakai
+            1. Jalankan **Linamp ≥ 2.1.0** (versi lama tidak menulis posisi playback).
+            2. Putar lagu.
+            3. Jalankan Linyrics — lirik muncul dan mengikuti lagu. Menjalankannya
+               lagi akan men-toggle window (`--quit` untuk keluar).
+
+            Lirik diambil dari `<lagu>.lrc` di sebelah file audio, lalu cache lokal,
+            lalu [LRCLIB](https://lrclib.net). Butuh `.lrc` sendiri? Pakai
+            `tools/lrc-tap` di repo.
+
+            ### Catatan
+            - Windows/macOS belum code-signed/notarized.
+            - Area transparan window tetap menangkap klik; atur `bg`/`hideWhenIdle`
+              di `~/.config/linyrics/config.json`.

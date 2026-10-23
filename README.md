@@ -1,6 +1,6 @@
 # LINYRICS
 
-**Linyrics** adalah jendela lirik melayang untuk **Linamp** — pengganti MiniLyrics
+**Linyrics** adalah jendela lirik melayang untuk **[Linamp](https://github.com/adiprnm/linamp)** — pengganti MiniLyrics
 untuk Linux: begitu lagu diputar di Linamp, liriknya muncul sendiri di atas desktop,
 baris yang sedang dinyanyikan menyala dengan sapuan karaoke, dan baris berikutnya
 sudah menunggu di bawahnya.
@@ -64,6 +64,19 @@ karaoke tetap rapat dengan suaranya (± beberapa milidetik) walaupun update-nya 
 Sisi Linamp-nya kecil: `src/nowplaying.h` / `src/nowplaying.cpp` (sekitar 100 baris),
 dipanggil sekali per frame dari `App::frame()`.
 
+## Unduh
+
+Ambil dari [**Releases**](https://github.com/adiprnm/linyrics/releases):
+
+| Platform | File | Catatan |
+| --- | --- | --- |
+| Linux x86_64 | `linyrics-linux-x86_64.AppImage` | glibc 2.39+; SDL3 dibundel, libcurl statis |
+| Windows x64 | `linyrics-windows-x64.zip` | ekstrak, jalankan `linyrics.exe` (DLL ikut) |
+| macOS arm64 | `linyrics-macos-arm64.dmg` | ad-hoc signed; klik kanan → Open |
+
+Butuh **Linamp 2.1.0+** — versi lama tidak menulis `nowplaying.json`, jadi lirik
+akan tampil tapi tidak bergerak.
+
 ## Build & jalankan
 
 Butuh SDL3, libcurl, dan compiler C++20 (Arch/Omarchy):
@@ -92,6 +105,31 @@ Lalu jalankan **Linamp**, putar lagu, dan jalankan **Linyrics** (atau dari launc
 | `linyrics --toggle` | Tampilkan / sembunyikan window (cocok untuk keybinding). |
 | `linyrics --quit` | Hentikan proses. |
 | `linyrics --version` / `--help` | Info. |
+
+### Build rilis (CMake, libcurl statis)
+
+Build yang dipakai CI: SDL3 **shared** (dibundel ke AppImage) + libcurl **statis**
+supaya OpenSSL dan kawan-kawan tidak ikut masuk paket.
+
+```bash
+./packaging/build-sdl3.sh "$PWD/deps/sdl3" shared   # SDL3
+./packaging/build-curl.sh "$PWD/deps/curl"          # libcurl statis, HTTPS saja
+
+cmake -S . -B build-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$PWD/deps/sdl3" \
+      -DCURL_ROOT="$PWD/deps/curl"
+cmake --build build-cmake
+./build-cmake/linyrics
+```
+
+Paket AppImage:
+
+```bash
+./packaging/make-appimage.sh ./build-cmake/linyrics "$PWD/deps/sdl3" linyrics.AppImage
+```
+
+Tanpa `-DCURL_ROOT`, CMake memakai libcurl dev package dari distro (cukup untuk
+build lokal, tapi jangan untuk AppImage karena dependency-nya jadi banyak).
 
 ## Keyboard & mouse
 
@@ -266,6 +304,25 @@ Cek `linyrics --toggle` dulu (mungkin sedang tersembunyi), lalu jalankan
 `LINYRICS_DEBUG=1 linyrics` untuk melihat `status`/`src`. Kalau `status=0`
 (IDLE), berarti snapshot dari Linamp tidak terbaca — pastikan Linamp-nya versi
 yang sudah menulis `$XDG_RUNTIME_DIR/linamp/nowplaying.json`.
+
+## Bikin `.lrc` sendiri
+
+`tools/lrc-tap` menghasilkan `.lrc` yang sinkron dengan cara paling akurat: lagu
+diputar lewat `mpv`, kamu menekan `Space` tiap baris berganti.
+
+```bash
+./tools/lrc-tap "$HOME/Music/Artist - Judul.mp3"
+```
+
+- Teks lirik diambil otomatis dari LRCLIB kalau lagunya ada; kalau LRCLIB sudah
+  punya versi **sinkron**, file `.lrc` langsung ditulis dan tidak perlu mengetuk
+  sama sekali.
+- Kalau tidak ada, tempel liriknya (atau `-l lirik.txt`), lalu `p` untuk memutar
+  dan `Space` untuk menandai tiap baris.
+- `Backspace` batalkan, `←/→` ±2 s, `[`/`]` ±10 s, `-`/`+` geser baris terakhir
+  ∓50 ms, `{`/`}` geser semua ∓100 ms, `g` ke baris nomor, `s` simpan, `q` keluar.
+- Hasil ditulis ke `<lagu>.lrc` di sebelah MP3 — sumber paling prioritas di
+  Linyrics. Tanpa dependensi Python selain stdlib.
 
 ## Batasan
 

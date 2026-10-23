@@ -3,3 +3,8 @@ build-*/
 *.o
 *.d
 *.bmp
+deps/
+.ci-cache/
+*.AppImage
+*.dmg
+*.zip
