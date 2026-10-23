@@ -1,0 +1,721 @@
+#!/usr/bin/env python3
+"""lrc-tap — tap along with a song to produce a synced .lrc file.
+
+Tujuan: lirik yang benar-benar sinkron untuk beberapa lagu favorit, tanpa
+model ML dan tanpa menebak. MP3 diputar lewat mpv, kamu menekan tombol tiap
+kali baris berganti, hasilnya .lrc di sebelah file audio (tempat Linyrics
+mencarinya lebih dulu).
+
+Tanpa dependensi Python di luar stdlib. Butuh `mpv` dan `ffprobe` (ffmpeg).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import tty
+import unicodedata
+import urllib.parse
+import urllib.request
+
+VERSION = "1.0.0"
+UA = "linyrics-lrc-tap/1.0 (https://github.com/adipurnm/linyrics)"
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def die(msg: str) -> "NoReturn":  # noqa: F821
+    eprint("lrc-tap: " + msg)
+    sys.exit(1)
+
+
+def fmt_time(sec: float | None) -> str:
+    if sec is None or sec < 0:
+        return "--:--.--"
+    m = int(sec // 60)
+    s = sec - m * 60
+    return f"{m:02d}:{s:05.2f}"
+
+
+def disp_width(text: str) -> int:
+    w = 0
+    for ch in text:
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def clip(text: str, width: int) -> str:
+    if disp_width(text) <= width:
+        return text
+    out, w = [], 0
+    for ch in text:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > width - 1:
+            out.append("…")
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out)
+
+
+def pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - disp_width(text))
+
+
+ARROWS = {"\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left"}
+
+
+def decode_keys(data: bytes) -> list[str]:
+    """Satu read() bisa berisi beberapa tombol; pecah jadi token."""
+    text = data.decode("utf-8", "replace")
+    keys: list[str] = []
+    i = 0
+    while i < len(text):
+        seq = text[i:i + 3]
+        if seq in ARROWS:
+            keys.append(seq)
+            i += 3
+            continue
+        keys.append(text[i])
+        i += 1
+    return keys
+
+
+# ---------------------------------------------------------------------------
+# source info
+# ---------------------------------------------------------------------------
+
+
+def probe_tags(path: str) -> tuple[str, str, float]:
+    """title, artist, duration (ffprobe; semua boleh kosong)."""
+    title = artist = ""
+    duration = 0.0
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration:format_tags=title,artist", "-of", "json", path],
+            capture_output=True, text=True, timeout=20).stdout
+        data = json.loads(out or "{}")
+        fmt = data.get("format", {})
+        tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
+        title = tags.get("title", "")
+        artist = tags.get("artist", "")
+        duration = float(fmt.get("duration") or 0.0)
+    except Exception:
+        pass
+
+    base = os.path.splitext(os.path.basename(path))[0]
+    base = re.sub(r"^\(\d{4}\)\s*", "", base)          # "(2002) Element - Rahasia Hati"
+    base = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", base)   # noise brackets
+    base = re.sub(r"\s+", " ", base).strip(" -_")
+    if " - " in base:
+        left, right = base.split(" - ", 1)
+        artist = artist or left.strip()
+        title = title or right.strip()
+    else:
+        title = title or base
+    return title.strip(), artist.strip(), duration
+
+
+def http_json(url: str) -> object | None:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def clean_artist(artist: str) -> str:
+    a = re.sub(r"\s*[-–]\s*topic\s*$", "", artist, flags=re.I)
+    a = re.sub(r"\s*vevo\s*$", "", a, flags=re.I)
+    a = re.sub(r"\s+official\s*$", "", a, flags=re.I)
+    return a.strip()
+
+
+def clean_title(title: str, artist: str) -> str:
+    t = re.sub(r"[\(\[\{][^\)\]\}]*[\)\]\}]", " ", title)      # buang (...) [..] {..}
+    t = re.sub(r"\s+(feat\.?|ft\.?)\s+.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -–|")
+    if " - " in t:
+        left, right = t.split(" - ", 1)
+        first = artist.split()[0].lower() if artist.strip() else ""
+        if (first and first in left.lower()) or not first:
+            t = right.strip(" -–|")
+    return t.strip()
+
+
+def lrclib_lookup(title: str, artist: str, duration: float):
+    """Return (synced, plain) strings; keduanya boleh None."""
+    title = clean_title(title, artist)
+    artist = clean_artist(artist)
+    if not title:
+        return None, None
+
+    urls = []
+    base = "https://lrclib.net/api/search?"
+    if artist:
+        urls.append(base + "track_name=" + urllib.parse.quote(title)
+                    + "&artist_name=" + urllib.parse.quote(artist))
+    urls.append(base + "track_name=" + urllib.parse.quote(title))
+    if artist:
+        urls.append(base + "q=" + urllib.parse.quote(artist + " " + title))
+
+    best_synced = best_plain = None
+    best_s = 1e9
+    for url in urls:
+        data = http_json(url)
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            dur = item.get("duration") or 0
+            # durasi beda jauh = versi lain; jangan dipakai
+            if duration and dur and abs(dur - duration) > 30:
+                continue
+            score = abs(dur - duration) if (duration and dur) else 5.0
+            synced, plain = item.get("syncedLyrics"), item.get("plainLyrics")
+            if synced and score < best_s:
+                best_s = score
+                best_synced = synced
+            if plain and best_plain is None:
+                best_plain = plain
+        if best_synced:
+            break
+    return best_synced, best_plain
+
+
+# ---------------------------------------------------------------------------
+# mpv over its JSON IPC socket
+# ---------------------------------------------------------------------------
+
+
+class Player:
+    def __init__(self, path: str, mpv_args: list[str]):
+        if not shutil.which("mpv"):
+            die("mpv tidak ditemukan (sudo pacman -S mpv)")
+        self.tmp = tempfile.mkdtemp(prefix="lrc-tap-")
+        self.sock_path = os.path.join(self.tmp, "mpv.sock")
+        self.proc = subprocess.Popen(
+            ["mpv", "--no-video", "--no-terminal", "--really-quiet", "--pause",
+             "--input-ipc-server=" + self.sock_path, *mpv_args, path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.sock = None
+        self.stream = None
+        self.req_id = 0
+        for _ in range(200):
+            if os.path.exists(self.sock_path):
+                try:
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.connect(self.sock_path)
+                    self.sock = s
+                    self.stream = s.makefile("rwb")
+                    break
+                except OSError:
+                    pass
+            if self.proc.poll() is not None:
+                die("mpv gagal dijalankan")
+            time.sleep(0.05)
+        if not self.stream:
+            die("tidak bisa terhubung ke mpv")
+
+    def cmd(self, *args):
+        self.req_id += 1
+        rid = self.req_id
+        self.stream.write((json.dumps({"command": list(args), "request_id": rid}) + "\n").encode())
+        self.stream.flush()
+        while True:
+            line = self.stream.readline()
+            if not line:
+                return {}
+            try:
+                msg = json.loads(line.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                continue
+            if msg.get("request_id") == rid:
+                return msg
+
+    def pos(self) -> float | None:
+        v = self.cmd("get_property", "time-pos").get("data")
+        return float(v) if isinstance(v, (int, float)) else None
+
+    def duration(self) -> float:
+        v = self.cmd("get_property", "duration").get("data")
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    def paused(self) -> bool:
+        return bool(self.cmd("get_property", "pause").get("data"))
+
+    def toggle_pause(self):
+        self.cmd("cycle", "pause")
+
+    def seek(self, seconds: float):
+        self.cmd("seek", seconds, "absolute+exact")
+
+    def nudge(self, seconds: float):
+        self.cmd("seek", seconds, "relative+exact")
+
+    def close(self):
+        try:
+            self.cmd("quit")
+        except Exception:
+            pass
+        try:
+            if self.stream:
+                self.stream.close()
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=3)
+        except Exception:
+            self.proc.kill()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# terminal
+# ---------------------------------------------------------------------------
+
+
+class Term:
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.tty = sys.stdin.isatty() and sys.stdout.isatty()
+        self.saved = None
+
+    def __enter__(self):
+        if self.tty:
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+            sys.stdout.write("\x1b[?1049h\x1b[?25l")  # alt screen, hide cursor
+            sys.stdout.flush()
+        return self
+
+    def __exit__(self, *exc):
+        if self.tty:
+            sys.stdout.write("\x1b[?25h\x1b[?1049l")
+            sys.stdout.flush()
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+
+    def size(self) -> tuple[int, int]:
+        try:
+            s = os.get_terminal_size()
+            return s.columns, s.lines
+        except OSError:
+            return 100, 30
+
+    def key(self, timeout: float) -> bytes | None:
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return None
+        try:
+            return os.read(self.fd, 8)
+        except OSError:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# app
+# ---------------------------------------------------------------------------
+
+HELP = [
+    ("Space/Enter", "tandai baris di posisi sekarang"),
+    ("Backspace/u", "batalkan tanda terakhir"),
+    ("↑ / ↓", "pindah baris tanpa menandai"),
+    ("← / →", "mundur/maju 2 detik"),
+    ("[ / ]", "mundur/maju 10 detik"),
+    ("- / +", "geser baris terakhir ∓50 ms"),
+    ("{ / }", "geser semua baris ∓100 ms"),
+    ("p", "pause / lanjut"),
+    ("g", "ke baris nomor…"),
+    ("s", "simpan sekarang"),
+    ("q / Q", "keluar (simpan / tanpa simpan)"),
+]
+
+
+class Tap:
+    def __init__(self, args, path, title, artist, lines):
+        self.args = args
+        self.path = path
+        self.title = title
+        self.artist = artist
+        self.lines = lines
+        self.marks: list[float | None] = [None] * len(lines)
+        self.cursor = 0
+        self.message = "p = mulai memutar, lalu Space tiap baris berganti"
+        self.message_until = time.time() + 6
+        self.player = Player(path, args.mpv_arg)
+        self.duration = self.player.duration()
+        self.last_pos = None
+        self.last_pos_at = 0.0
+
+    # --- info ---
+    def say(self, text):
+        self.message = text
+        self.message_until = time.time() + 4
+
+    def position(self) -> float | None:
+        return self.player.pos()
+
+    # --- actions ---
+    def tap(self):
+        pos = self.position()
+        if pos is None:
+            self.say("belum ada posisi (mpv belum siap)")
+            return
+        if self.cursor >= len(self.lines):
+            self.say("semua baris sudah ditandai")
+            return
+        self.marks[self.cursor] = pos
+        self.cursor += 1
+        if self.cursor >= len(self.lines):
+            self.say("semua baris tertanda — 's' simpan, 'q' keluar")
+
+    def undo(self):
+        if self.cursor > 0:
+            self.cursor -= 1
+            self.marks[self.cursor] = None
+            self.say(f"batal baris {self.cursor + 1}")
+
+    def move(self, delta):
+        self.cursor = max(0, min(len(self.lines) - 1, self.cursor + delta))
+
+    def nudge(self, delta, all_lines=False):
+        if all_lines:
+            done = 0
+            for i, m in enumerate(self.marks):
+                if m is not None:
+                    self.marks[i] = max(0.0, m + delta)
+                    done += 1
+            if done:
+                self.say(f"semua {done} baris {'+' if delta > 0 else ''}{delta * 1000:.0f} ms")
+        else:
+            i = self.cursor - 1
+            if i >= 0 and self.marks[i] is not None:
+                self.marks[i] = max(0.0, self.marks[i] + delta)
+                self.say(f"baris {i + 1} {'+' if delta > 0 else ''}{delta * 1000:.0f} ms")
+
+    def goto(self, term: Term):
+        # prompt singkat di status line
+        if not term.tty:
+            return
+        buf = ""
+        while True:
+            self.render(term, prompt="baris nomor: " + buf + "▏")
+            k = term.key(0.5)
+            if not k:
+                continue
+            ch = k.decode("utf-8", "replace")
+            if ch in ("\r", "\n"):
+                break
+            if ch in ("\x1b", "\x03"):
+                return
+            if ch in ("\x7f", "\x08"):
+                buf = buf[:-1]
+            elif ch.isdigit() and len(buf) < 4:
+                buf += ch
+        if buf:
+            n = int(buf) - 1
+            self.cursor = max(0, min(len(self.lines) - 1, n))
+
+    # --- saving ---
+    def save(self) -> str:
+        out = self.args.output or (os.path.splitext(self.path)[0] + ".lrc")
+        shift = self.args.offset / 1000.0
+        rows = [(self.marks[i], self.lines[i]) for i in range(len(self.lines))
+                if self.marks[i] is not None]
+        if not rows:
+            die("tidak ada baris yang ditandai, tidak ada yang disimpan")
+        if os.path.exists(out):
+            try:
+                shutil.copyfile(out, out + ".bak")
+            except OSError:
+                pass
+        body = []
+        if self.title:
+            body.append(f"[ti:{self.title}]")
+        if self.artist:
+            body.append(f"[ar:{self.artist}]")
+        for t, text in rows:
+            ms = max(0.0, t + shift)
+            m = int(ms // 60)
+            s = ms - m * 60
+            body.append(f"[{m:02d}:{s:05.2f}]{text}")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("\n".join(body) + "\n")
+        return out
+
+    def render(self, term: Term, prompt: str | None = None):
+        cols, rows = term.size()
+        grid_w = max(40, cols - 26)
+        now = time.time()
+        if now - self.last_pos_at > 0.1:
+            self.last_pos = self.player.pos()
+            self.last_pos_at = now
+            self.paused = self.player.paused()
+
+        out = ["\x1b[H"]
+        elapsed = self.last_pos
+        total = self.duration or 0.0
+        tracked = sum(1 for m in self.marks if m is not None)
+
+        head = f" lrc-tap · {os.path.basename(self.path)}"
+        timebit = f"{fmt_time(elapsed)} / {fmt_time(total)}"
+        state = "PAUSE" if getattr(self, "paused", True) else "PLAY "
+        line1 = pad(clip(head, cols - len(timebit) - 8), cols - len(timebit) - 8)
+        out.append("\x1b[1;36m" + line1 + "\x1b[0m " + state + " " + timebit + "\x1b[K\r\n")
+
+        bar_w = max(10, cols - 18)
+        frac = (elapsed / total) if (elapsed is not None and total > 0) else 0.0
+        filled = int(bar_w * max(0.0, min(1.0, frac)))
+        out.append(" " + "\x1b[90m" + "─" * filled + "\x1b[0m" + "\x1b[90m"
+                   + "─" * (bar_w - filled) + "\x1b[0m"
+                   + f" {tracked}/{len(self.lines)}" + "\x1b[K\r\n")
+        out.append("─" * cols + "\x1b[K\r\n")
+
+        visible = max(4, rows - 9)
+        start = max(0, min(self.cursor - visible // 2, max(0, len(self.lines) - visible)))
+        for i in range(start, min(len(self.lines), start + visible)):
+            mark = self.marks[i]
+            marker = "▶" if i == self.cursor else " "
+            tick = "✓" if mark is not None else " "
+            num = f"{i + 1:3d}"
+            ttxt = f"[{fmt_time(mark)}]" if mark is not None else "[   --:--.--]".replace("--:--.--", "  --.--")
+            text = clip(self.lines[i], grid_w)
+            if i == self.cursor:
+                style = "\x1b[1;33m"
+            elif mark is not None:
+                style = "\x1b[32m"
+            else:
+                style = "\x1b[0m"
+            out.append(f"{marker} {num} {tick} {ttxt} {style}{pad(text, grid_w)}\x1b[0m\x1b[K\r\n")
+        for _ in range(visible - (min(len(self.lines), start + visible) - start)):
+            out.append("\x1b[K\r\n")
+
+        if prompt is not None:
+            out.append("\x1b[1;35m " + prompt + "\x1b[0m\x1b[K\r\n")
+        elif now < self.message_until and self.message:
+            out.append("\x1b[1;35m " + clip(self.message, cols - 2) + "\x1b[0m\x1b[K\r\n")
+        else:
+            out.append("\x1b[K\r\n")
+
+        keys = "  ".join(f"\x1b[1m{k}\x1b[0m {v}" for k, v in HELP[:6])
+        keys2 = "  ".join(f"\x1b[1m{k}\x1b[0m {v}" for k, v in HELP[6:])
+        out.append("\x1b[90m" + clip(keys, cols) + "\x1b[0m\x1b[K\r\n")
+        out.append("\x1b[90m" + clip(keys2, cols) + "\x1b[0m\x1b[K\r\n")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    # --- main loop ---
+    def run(self) -> int:
+        save_now = False
+        with Term() as term:
+            if not term.tty:
+                self.say("input bukan TTY: membaca tombol dari stdin")
+                self.message = ""
+            dirty = True
+            while True:
+                if dirty:
+                    self.render(term)
+                    dirty = False
+                k = term.key(0.04)
+                if k is None:
+                    if time.time() - self.last_pos_at > 0.1:
+                        dirty = True
+                    continue
+                if k == b"":  # stdin ditutup / sesi pipa selesai
+                    save_now = True
+                    break
+                dirty = True
+                stop = False
+                for ch in decode_keys(k):
+                    if ch == "\x03":
+                        raise KeyboardInterrupt
+                    if ch in (" ", "\r", "\n"):
+                        self.tap()
+                    elif ch in ("\x7f", "\x08", "u"):
+                        self.undo()
+                    elif ch == "\x1b[A":
+                        self.move(-1)
+                    elif ch == "\x1b[B":
+                        self.move(1)
+                    elif ch == "\x1b[D":
+                        self.player.nudge(-2.0)
+                    elif ch == "\x1b[C":
+                        self.player.nudge(2.0)
+                    elif ch == "[":
+                        self.player.nudge(-10.0)
+                    elif ch == "]":
+                        self.player.nudge(10.0)
+                    elif ch == "-":
+                        self.nudge(-0.05)
+                    elif ch in ("+", "="):
+                        self.nudge(0.05)
+                    elif ch == "{":
+                        self.nudge(-0.1, all_lines=True)
+                    elif ch == "}":
+                        self.nudge(0.1, all_lines=True)
+                    elif ch == "p":
+                        self.player.toggle_pause()
+                    elif ch == "g":
+                        self.goto(term)
+                        dirty = True
+                        break
+                    elif ch in ("s", "q", "Q"):
+                        save_now = ch in ("s", "q")
+                        stop = True
+                        break
+                    else:
+                        continue
+                if stop:
+                    break
+            self.player.close()
+        return 0 if save_now else 2
+
+
+# ---------------------------------------------------------------------------
+# lyrics input
+# ---------------------------------------------------------------------------
+
+
+def read_lines_from_file(path: str) -> list[str]:
+    if path == "-":
+        raw = sys.stdin.read()
+    else:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    out = []
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        # buang timestamp kalau user memberi lrc mentah
+        ln = re.sub(r"^(\[[0-9:.]+\])+\s*", "", ln)
+        out.append(ln)
+    return out
+
+
+def prompt_lines() -> list[str]:
+    if not sys.stdin.isatty():
+        return read_lines_from_file("-")
+    print("Tempel/ketik lirik (satu baris per baris).")
+    print("Akhiri dengan baris berisi satu titik (.) — Enter kosong = selesai.\n")
+    out = []
+    while True:
+        try:
+            ln = input()
+        except EOFError:
+            break
+        if ln.strip() == ".":
+            break
+        if not ln.strip():
+            if out:
+                break
+            continue
+        out.append(ln.strip())
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="lrc-tap",
+        description="Bikin file .lrc sinkron dengan mengetuk tombol mengikuti lagu.")
+    ap.add_argument("audio", help="file audio (mp3/flac/m4a/...)")
+    ap.add_argument("-l", "--lyrics", help="file teks lirik ('-' = stdin)")
+    ap.add_argument("-o", "--output", help="tulis .lrc ke path ini (default: sebelah file audio)")
+    ap.add_argument("--offset", type=int, default=0, metavar="MS",
+                    help="geser semua timestamp sebanyak MS saat menyimpan (default 0)")
+    ap.add_argument("--no-lrclib", action="store_true", help="jangan cari teks lirik ke LRCLIB")
+    ap.add_argument("--mpv-arg", action="append", default=[], metavar="ARG",
+                    help="argumen tambahan untuk mpv (bisa diulang), mis. --mpv-arg=--ao=null")
+    ap.add_argument("--version", action="version", version=f"lrc-tap {VERSION}")
+    args = ap.parse_args()
+
+    path = os.path.abspath(os.path.expanduser(args.audio))
+    if not os.path.isfile(path):
+        die(f"file tidak ditemukan: {path}")
+    for tool in ("ffprobe", "mpv"):
+        if not shutil.which(tool):
+            die(f"butuh '{tool}' di PATH")
+
+    title, artist, duration = probe_tags(path)
+
+    lines: list[str] = []
+    if args.lyrics:
+        lines = read_lines_from_file(args.lyrics)
+    elif not args.no_lrclib:
+        synced, plain = lrclib_lookup(title, artist, duration)
+        if synced:
+            out = args.output or (os.path.splitext(path)[0] + ".lrc")
+            if os.path.exists(out):
+                shutil.copyfile(out, out + ".bak")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(synced.rstrip() + "\n")
+            print(f"LRCLIB sudah punya lirik sinkron untuk lagu ini → disimpan: {out}")
+            print("Tidak perlu mengetuk apa pun. (Pakai --no-lrclib untuk tetap mengetuk manual.)")
+            return 0
+        if plain:
+            lines = read_lines_from_file_from_text(plain)
+            print(f"Teks lirik diambil dari LRCLIB ({len(lines)} baris).")
+
+    if not lines:
+        lines = prompt_lines()
+    if not lines:
+        die("tidak ada baris lirik; pakai -l FILE atau tempel saat diminta")
+
+    print(f"\n{title or '?'} — {artist or '?'}")
+    print(f"{len(lines)} baris siap. mpv mulai dalam keadaan pause — tekan 'p' untuk memutar.\n")
+
+    app = Tap(args, path, title, artist, lines)
+    try:
+        code = app.run()
+    except KeyboardInterrupt:
+        app.player.close()
+        print("\nDibatalkan, tidak ada yang disimpan.")
+        return 130
+
+    if code == 2:
+        print("\nKeluar tanpa menyimpan.")
+        return 2
+
+    out = app.save()
+    tapped = sum(1 for m in app.marks if m is not None)
+    print(f"\nTersimpan: {out}")
+    print(f"  {tapped}/{len(lines)} baris bertanda")
+    if tapped < len(lines):
+        print(f"  ({len(lines) - tapped} baris tidak ditandai tidak ikut disimpan)")
+    print("\nLinyrics membaca .lrc di sebelah file audio lebih dulu.")
+    print("Kalau lagunya sedang diputar, tekan R di jendela Linyrics untuk memuat ulang.")
+    return 0
+
+
+def read_lines_from_file_from_text(text: str) -> list[str]:
+    out = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            out.append(ln)
+    return out
+
+
+if __name__ == "__main__":
+    sys.exit(main())

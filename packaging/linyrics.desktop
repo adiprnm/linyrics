@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Linyrics
+GenericName=Karaoke Lyrics
+Comment=Lyrics that follow what Linamp is playing
+Exec=linyrics
+Icon=linyrics
+Terminal=false
+StartupWMClass=linyrics
+StartupNotify=false
+Categories=AudioVideo;Audio;Player;
+Keywords=lyrics;karaoke;lrc;lyrics;linamp;minilyrics;
