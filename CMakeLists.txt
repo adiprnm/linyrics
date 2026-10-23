@@ -72,17 +72,13 @@ if(CURL_ROOT)
         target_link_libraries(linyrics PRIVATE "${CURL_LIBRARY}"
             ws2_32 crypt32 secur32 bcrypt iphlpapi)
     else()
-        # Everything stays static so the AppImage only has to carry SDL3.
+        # Everything stays static so the AppImage only has to carry SDL3
+        # (the curl build has compression and HTTP/2 disabled, so no zlib).
         set(OPENSSL_USE_STATIC_LIBS TRUE)
-        set(ZLIB_USE_STATIC_LIBS TRUE)
         find_package(OpenSSL REQUIRED)
-        find_package(ZLIB QUIET)
         find_package(Threads REQUIRED)
         target_link_libraries(linyrics PRIVATE
             "${CURL_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
-        if(ZLIB_FOUND)
-            target_link_libraries(linyrics PRIVATE ZLIB::ZLIB)
-        endif()
     endif()
     if(APPLE)
         target_link_libraries(linyrics PRIVATE "-framework CoreFoundation" "-framework Security")

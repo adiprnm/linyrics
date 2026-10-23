@@ -5,8 +5,9 @@
 #   packaging/build-curl.sh <install-prefix>
 #
 # Linyrics only needs HTTPS GET with the system CA store. Everything else
-# (HTTP/2, ssh, ldap, brotli, zstd, idn) is disabled so the static library stays
-# small enough to link into a single ~1 MB binary.
+# (HTTP/2, ssh, ldap, compression, idn) is disabled so the static library stays
+# small enough to link into a single binary — and so the executable needs no
+# zlib/brotli/zstd at link time on any platform.
 #
 # Linux/macOS: OpenSSL from the system (libssl-dev / brew openssl).
 # ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ fi
     --prefix="$PREFIX" \
     --disable-shared --enable-static \
     $TLS_ARGS \
-    --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
+    --without-libpsl --without-brotli --without-zstd --without-zlib --without-nghttp2 \
     --without-libssh2 --without-libidn2 \
     --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
     --disable-telnet --disable-tftp --disable-pop3 --disable-imap \
