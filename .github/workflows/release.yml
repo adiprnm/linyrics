@@ -255,35 +255,43 @@ jobs:
           files: artifacts/*
           fail_on_unmatched_files: true
           body: |
-            ## Linyrics ${{ github.ref_name }}
+            ## Linyrics v1.0.0
 
             Lirik melayang ala MiniLyrics untuk [Linamp](https://github.com/adiprnm/linamp) —
             C++ / SDL3 + libcurl, tanpa Qt/Electron.
 
             ![Linyrics](https://raw.githubusercontent.com/adiprnm/linyrics/main/screenshot.png)
 
-            | Platform | File | Catatan |
-            | --- | --- | --- |
-            | Linux x86_64 | `linyrics-linux-x86_64.AppImage` | glibc 2.39+; SDL3 dibundel, libcurl statis |
-            | Windows x64 | `linyrics-windows-x64.zip` | Ekstrak lalu jalankan `linyrics.exe` (DLL ikut di dalam) |
-            | macOS arm64 | `linyrics-macos-arm64.dmg` | Ad-hoc signed; klik kanan → Open kalau Gatekeeper menolak |
+            | Platform | File | Ukuran | Catatan |
+            | --- | --- | --- | --- |
+            | Linux x86_64 (glibc 2.39+) | `linyrics-linux-x86_64.AppImage` | 4,6 MB | self-contained; SDL3 dibundel, libcurl statis |
+            | Windows x64 | `linyrics-windows-x64.zip` | 2,4 MB | satu `linyrics.exe`, tanpa DLL |
+            | macOS arm64 (Apple Silicon) | `linyrics-macos-arm64.dmg` | 1,6 MB | ad-hoc signed; klik kanan → Open kalau Gatekeeper menolak |
 
             Checksums: `SHA256SUMS.txt`.
 
             ### Pakai
-            1. Jalankan **Linamp ≥ 2.1.0** (versi lama tidak menulis posisi playback).
-            2. Putar lagu.
-            3. Jalankan Linyrics — lirik muncul dan mengikuti lagu. Menjalankannya
-               lagi akan men-toggle window (`--quit` untuk keluar).
 
-            Lirik diambil dari `<lagu>.lrc` di sebelah file audio, lalu cache lokal,
-            lalu [LRCLIB](https://lrclib.net). Butuh `.lrc` sendiri? Pakai
-            `tools/lrc-tap` di repo.
+            1. Jalankan **Linamp 2.1.1+** (di Windows wajib 2.1.1 — versi itu yang menaruh
+               `nowplaying.json` di `%LOCALAPPDATA%`).
+            2. Putar lagu.
+            3. Jalankan Linyrics — lirik muncul dan mengikuti lagu. Menjalankannya lagi akan
+               men-toggle window, `--quit` untuk keluar.
+
+            ```bash
+            chmod +x linyrics-linux-x86_64.AppImage
+            ./linyrics-linux-x86_64.AppImage
+            ```
+
+            Lirik diambil dari `<lagu>.lrc` di sebelah file audio, lalu cache lokal, lalu
+            [LRCLIB](https://lrclib.net). Butuh `.lrc` sendiri? Pakai `tools/lrc-tap` di repo.
 
             ### Catatan
-            - Windows/macOS belum code-signed/notarized.
-            - Linux: SDL3 dibundel, libcurl di-link statis. Windows: SDL3 + libcurl
-              (Schannel, jadi tanpa OpenSSL) di-link statis. macOS: SDL3 statis,
-              libcurl dari sistem.
-            - Area transparan window tetap menangkap klik; atur `bg`/`hideWhenIdle`
-              di `~/.config/linyrics/config.json`.
+
+            - Windows/macOS belum code-signed/notarized; SmartScreen/Gatekeeper bisa
+              menampilkan peringatan.
+            - Linux: SDL3 dibundel + libcurl statis. Windows: SDL3 + libcurl (Schannel, tanpa
+              OpenSSL) statis, satu exe. macOS: SDL3 statis, libcurl dari sistem.
+            - Area transparan window tetap menangkap klik; atur `bg`/`hideWhenIdle` di
+              `~/.config/linyrics/config.json`.
+            - Aturan Hyprland (floating, pinned optional, `no_initial_focus`) ada di README.
