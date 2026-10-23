@@ -282,5 +282,8 @@ jobs:
 
             ### Catatan
             - Windows/macOS belum code-signed/notarized.
+            - Linux: SDL3 dibundel, libcurl di-link statis. Windows: SDL3 + libcurl
+              (Schannel, jadi tanpa OpenSSL) di-link statis. macOS: SDL3 statis,
+              libcurl dari sistem.
             - Area transparan window tetap menangkap klik; atur `bg`/`hideWhenIdle`
               di `~/.config/linyrics/config.json`.

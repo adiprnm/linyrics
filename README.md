@@ -35,8 +35,8 @@ hanya teks lirik dan sapuan karaokenya yang tampil.*
 - **Jendela transparan & frameless** seperti panel Winamp-nya Linamp. Bisa digeser
   ke mana saja, punya mode background *none / dim / dark*.
 - **Kecil.** Binary build lokal ±430 KB (libcurl dari sistem). Di paket rilis
-  libcurl + OpenSSL di-link statis supaya tidak perlu membundel dependency-nya:
-  AppImage ±4,8 MB, dmg macOS ±1,7 MB. Tidak ada Electron, dan font diambil dari
+  libcurl di-link statis supaya tidak perlu membundel dependency-nya:
+  AppImage ±4,7 MB, `linyrics.exe` ±6 MB (zip ±2,5 MB), dmg macOS ±1,7 MB. Tidak ada Electron, dan font diambil dari
   sistem saat runtime.
 
 ## Cara kerja
@@ -73,7 +73,7 @@ Ambil dari [**Releases**](https://github.com/adiprnm/linyrics/releases):
 | Platform | File | Catatan |
 | --- | --- | --- |
 | Linux x86_64 | `linyrics-linux-x86_64.AppImage` (±4,8 MB) | glibc 2.39+; SDL3 dibundel, libcurl statis |
-| Windows x64 | `linyrics-windows-x64.zip` | ekstrak, jalankan `linyrics.exe` (DLL ikut) |
+| Windows x64 | `linyrics-windows-x64.zip` (±2,5 MB) | satu `linyrics.exe`, tanpa DLL |
 | macOS arm64 | `linyrics-macos-arm64.dmg` (±1,7 MB) | ad-hoc signed; klik kanan → Open |
 
 Butuh **Linamp 2.1.0+** — versi lama tidak menulis `nowplaying.json`, jadi lirik
