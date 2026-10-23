@@ -66,16 +66,23 @@ if(CURL_ROOT)
     find_library(CURL_LIBRARY NAMES curl HINTS "${CURL_ROOT}/lib" REQUIRED)
     target_include_directories(linyrics PRIVATE "${CURL_INCLUDE_DIR}")
     target_compile_definitions(linyrics PRIVATE CURL_STATICLIB)
-    # Everything stays static so the AppImage only has to carry SDL3.
-    set(OPENSSL_USE_STATIC_LIBS TRUE)
-    set(ZLIB_USE_STATIC_LIBS TRUE)
-    find_package(OpenSSL REQUIRED)
-    find_package(ZLIB QUIET)
-    find_package(Threads REQUIRED)
-    target_link_libraries(linyrics PRIVATE
-        "${CURL_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
-    if(ZLIB_FOUND)
-        target_link_libraries(linyrics PRIVATE ZLIB::ZLIB)
+    if(WIN32)
+        # Schannel (built with CURL_TLS=schannel) uses the OS TLS stack, so no
+        # OpenSSL and no extra DLLs in the release zip.
+        target_link_libraries(linyrics PRIVATE "${CURL_LIBRARY}"
+            ws2_32 crypt32 secur32 bcrypt iphlpapi)
+    else()
+        # Everything stays static so the AppImage only has to carry SDL3.
+        set(OPENSSL_USE_STATIC_LIBS TRUE)
+        set(ZLIB_USE_STATIC_LIBS TRUE)
+        find_package(OpenSSL REQUIRED)
+        find_package(ZLIB QUIET)
+        find_package(Threads REQUIRED)
+        target_link_libraries(linyrics PRIVATE
+            "${CURL_LIBRARY}" OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${CMAKE_DL_LIBS})
+        if(ZLIB_FOUND)
+            target_link_libraries(linyrics PRIVATE ZLIB::ZLIB)
+        endif()
     endif()
     if(APPLE)
         target_link_libraries(linyrics PRIVATE "-framework CoreFoundation" "-framework Security")
@@ -94,9 +101,12 @@ if(APPLE)
         INSTALL_RPATH "@executable_path/../Frameworks")
 endif()
 
-# Windows: no console window for a GUI-only app.
+# Windows: no console window for a GUI-only app, and no MinGW runtime DLLs.
 if(WIN32)
     set_target_properties(linyrics PROPERTIES WIN32_EXECUTABLE ON)
+endif()
+if(MINGW)
+    target_link_options(linyrics PRIVATE -static -static-libgcc -static-libstdc++ -s)
 endif()
 
 install(TARGETS linyrics RUNTIME DESTINATION bin)

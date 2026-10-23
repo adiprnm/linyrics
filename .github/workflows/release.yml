@@ -89,7 +89,7 @@ jobs:
   windows:
     name: Windows x64
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -102,13 +102,24 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-sdl3
-            mingw-w64-x86_64-curl
-            zip
+            make curl zip
+
+      - name: Build SDL3 (static)
+        shell: msys2 {0}
+        run: ./packaging/build-sdl3.sh /c/sdl3-static static
+
+      - name: Build libcurl (static, Schannel — no OpenSSL DLLs)
+        shell: msys2 {0}
+        run: |
+          CURL_TLS=schannel CURL_BUILD_DIR=/c/curl-build             ./packaging/build-curl.sh /c/curl-static
 
       - name: Configure
         shell: msys2 {0}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(cygpath -m /c/sdl3-static)" \
+            -DCURL_ROOT="$(cygpath -m /c/curl-static)"
 
       - name: Build
         shell: msys2 {0}
@@ -127,9 +138,9 @@ jobs:
           set -euo pipefail
           rm -rf dist && mkdir -p dist
           cp build/linyrics.exe dist/
-          # SDL3 + libcurl and whatever they need, but nothing from the OS
-          ldd build/linyrics.exe | awk '/mingw64/ {print $3}' | sort -u | xargs -r -I{} cp {} dist/
           cp README.md CHANGELOG.md dist/
+          # single self-contained exe: SDL3, libcurl (Schannel) and the MinGW
+          # runtime are all linked statically
           (cd dist && zip -9 -r ../linyrics-windows-x64.zip .)
           ls -lh linyrics-windows-x64.zip
 

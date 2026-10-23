@@ -38,10 +38,15 @@ fi
 cd "$SRC"
 
 echo "==> configuring"
+# Windows has its own TLS stack; using it avoids shipping OpenSSL DLLs.
+TLS_ARGS="--with-openssl"
+if [ "${CURL_TLS:-openssl}" = "schannel" ]; then
+    TLS_ARGS="--with-schannel"
+fi
 ./configure \
     --prefix="$PREFIX" \
     --disable-shared --enable-static \
-    --with-openssl \
+    $TLS_ARGS \
     --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
     --without-libssh2 --without-libidn2 \
     --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
