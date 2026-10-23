@@ -17,6 +17,11 @@ int64_t jsonInt(const Json &root, const char *key, int64_t def = 0)
 
 std::string NowPlayingReader::filePath()
 {
+#ifdef _WIN32
+    // shared with linamp's publisher on Windows
+    if (const char *x = std::getenv("LOCALAPPDATA"); x && *x)
+        return std::string(x) + "/linamp/nowplaying.json";
+#endif
     if (const char *x = std::getenv("XDG_RUNTIME_DIR"); x && *x)
         return std::string(x) + "/linamp/nowplaying.json";
     if (const char *h = std::getenv("HOME"); h && *h)

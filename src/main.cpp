@@ -9,80 +9,16 @@
      linyrics --quit     stop the running instance
    ------------------------------------------------------------------ */
 #include "app.h"
+#include "instance.h"
 
 #include <SDL3/SDL.h>
 
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
-#include <signal.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 namespace {
-
-volatile sig_atomic_t g_toggleRequest = 0;
-volatile sig_atomic_t g_quitRequest = 0;
-
-void onSignal(int sig)
-{
-    if (sig == SIGUSR1)
-        g_toggleRequest = 1;
-    else
-        g_quitRequest = 1;
-}
-
-std::string runtimeDir()
-{
-    if (const char *x = std::getenv("XDG_RUNTIME_DIR"); x && *x)
-        return x;
-    return "/tmp";
-}
-
-std::string pidPath()
-{
-    return runtimeDir() + "/linyrics.pid";
-}
-
-bool readPid(long &pid)
-{
-    FILE *f = std::fopen(pidPath().c_str(), "r");
-    if (!f)
-        return false;
-    const bool ok = std::fscanf(f, "%ld", &pid) == 1;
-    std::fclose(f);
-    return ok;
-}
-
-/* Returns true when the signal was delivered to a live instance. */
-bool signalInstance(int sig)
-{
-    long pid = 0;
-    if (!readPid(pid) || pid <= 0 || pid == long(getpid()))
-        return false;
-    if (kill(pid_t(pid), 0) != 0)
-        return false;
-    return kill(pid_t(pid), sig) == 0;
-}
-
-void writePidFile()
-{
-    FILE *f = std::fopen(pidPath().c_str(), "w");
-    if (!f)
-        return;
-    std::fprintf(f, "%ld\n", long(getpid()));
-    std::fclose(f);
-}
-
-void removePidFile()
-{
-    long pid = 0;
-    if (readPid(pid) && pid == long(getpid()))
-        std::remove(pidPath().c_str());
-}
 
 int runScreenshot(App &app)
 {
@@ -112,6 +48,17 @@ int runScreenshot(App &app)
     return ok ? 0 : 1;
 }
 
+void printHelp()
+{
+    std::printf(
+        "linyrics %s — floating karaoke lyrics for linamp\n\n"
+        "  linyrics            start, or toggle the running window\n"
+        "  linyrics --toggle   show/hide the running window\n"
+        "  linyrics --quit     stop the running window\n\n"
+        "Config: ~/.config/linyrics/config.json\n",
+        LINYRICS_VERSION);
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -127,59 +74,50 @@ int main(int argc, char *argv[])
             std::printf("linyrics %s\n", LINYRICS_VERSION);
             return 0;
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            std::printf(
-                "linyrics %s — floating karaoke lyrics for linamp\n\n"
-                "  linyrics            start, or toggle the running window\n"
-                "  linyrics --toggle   show/hide the running window\n"
-                "  linyrics --quit     stop the running window\n\n"
-                "Config: ~/.config/linyrics/config.json\n",
-                LINYRICS_VERSION);
+            printHelp();
             return 0;
         }
     }
 
     if (wantQuit) {
-        if (signalInstance(SIGTERM))
+        if (instance_signal(true))
             return 0;
         std::fprintf(stderr, "linyrics: nothing running\n");
         return 1;
     }
     if (wantToggle) {
-        if (signalInstance(SIGUSR1))
+        if (instance_signal(false))
             return 0;
         std::fprintf(stderr, "linyrics: nothing running\n");
         return 1;
     }
 
-    // already running? just show/hide it instead of starting a second copy
-    // (screenshot/self-test runs are exempt: they never open a real window)
+    // Screenshot/self-test runs never open a real window, so they must not take
+    // the single-instance lock (that used to leave a stale pid file behind).
     const bool offline = std::getenv("LINYRICS_SCREENSHOT") || std::getenv("LINYRICS_TEST");
-    if (!offline && signalInstance(SIGUSR1))
+
+    if (!offline && !instance_start()) {
+        // Already running: just show/hide it.
+        instance_signal(false);
         return 0;
+    }
 
     SDL_SetAppMetadata("Linyrics", LINYRICS_VERSION, "local.linyrics.app");
     SDL_SetHint(SDL_HINT_APP_NAME, "Linyrics");
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         std::fprintf(stderr, "linyrics: SDL_Init failed: %s\n", SDL_GetError());
+        if (!offline)
+            instance_stop();
         return 1;
     }
-
-    struct sigaction sa{};
-    sa.sa_handler = onSignal;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGUSR1, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGINT, &sa, nullptr);
-
-    if (!offline)
-        writePidFile();
 
     int exitCode = 0;
     {
         App app;
         if (!app.init()) {
-            removePidFile();
+            if (!offline)
+                instance_stop();
             SDL_Quit();
             return 1;
         }
@@ -191,16 +129,17 @@ int main(int argc, char *argv[])
         } else {
             SDL_Event event;
             double lastDraw = 0;
-            while (app.running() && !g_quitRequest) {
+            while (app.running()) {
                 while (SDL_PollEvent(&event))
                     app.handleEvent(event);
                 if (!app.running())
                     break;
 
-                if (g_toggleRequest) {
-                    g_toggleRequest = 0;
+                instance_poll();
+                if (instance_take_quit())
+                    break;
+                if (instance_take_toggle())
                     app.toggleVisible();
-                }
 
                 const double now = double(SDL_GetTicksNS()) / 1e9;
                 const double interval = app.wantsFastFrames() ? 1.0 / 60.0 : 1.0 / 15.0;
@@ -216,7 +155,7 @@ int main(int argc, char *argv[])
     }
 
     if (!offline)
-        removePidFile();
+        instance_stop();
     SDL_Quit();
     return exitCode;
 }

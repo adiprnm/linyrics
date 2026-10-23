@@ -29,6 +29,8 @@ set(SOURCES
     src/lyrics.h
     src/nowplaying.cpp
     src/nowplaying.h
+    src/instance.cpp
+    src/instance.h
     src/gfx.cpp
     src/gfx.h
     src/font.cpp

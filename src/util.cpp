@@ -154,6 +154,10 @@ void ensureDir(const std::string &path)
 
 std::string configDir()
 {
+#ifdef _WIN32
+    if (const char *x = std::getenv("APPDATA"); x && *x)
+        return std::string(x) + "/linyrics";
+#endif
     if (const char *x = std::getenv("XDG_CONFIG_HOME"); x && *x)
         return std::string(x) + "/linyrics";
     if (const char *h = std::getenv("HOME"); h && *h)
@@ -163,6 +167,10 @@ std::string configDir()
 
 std::string cacheDir()
 {
+#ifdef _WIN32
+    if (const char *x = std::getenv("LOCALAPPDATA"); x && *x)
+        return std::string(x) + "/linyrics";
+#endif
     if (const char *x = std::getenv("XDG_CACHE_HOME"); x && *x)
         return std::string(x) + "/linyrics";
     if (const char *h = std::getenv("HOME"); h && *h)

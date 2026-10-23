@@ -138,8 +138,13 @@ bool App::init()
     m_debug = std::getenv("LINYRICS_DEBUG") != nullptr;
     loadConfig();
 
+#ifdef _WIN32
+    if (!m_cfg.fontPath.empty())
+        _putenv_s("LINYRICS_FONT", m_cfg.fontPath.c_str());
+#else
     if (!m_cfg.fontPath.empty())
         setenv("LINYRICS_FONT", m_cfg.fontPath.c_str(), 1);
+#endif
     m_font.load();
 
     m_width = std::max(320, m_cfg.width);
